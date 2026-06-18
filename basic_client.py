@@ -5,14 +5,14 @@ import requests
 
 
 
-USER = "your-username-here"
-PASSWORD = "your-password-here"
+USER = "group14"
+PASSWORD = "ip00y-p92nc-9smqo"
 BASE_URL = "https://mlme26biosim.org"
 
 # Basic use:
-#   client = BioreactorClient(BASE_URL)
-#   client.login(USER, PASSWORD)
-#   result = client.run("micro", T=30.0, pH=6.5, F1=0.5, F2=0.5, F3=0.5)
+client = BioreactorClient(BASE_URL)
+client.login(USER, PASSWORD)
+result = client.run("micro", T=30.0, pH=6.5, F1=0.5, F2=0.5, F3=0.5)
 
 
 
