@@ -115,7 +115,7 @@ class CustomStaircaseCostModel(DeterministicModel):
         self.fidelity_idx = fidelity_idx
         self._num_outputs = 1
         
-        costs = torch.tensor([0.01, 0.075, 0.5], device=device, dtype=dtype)
+        costs = torch.tensor([0.01, 0.5, 2], device=device, dtype=dtype)
         self.register_buffer("costs", costs)
 
     def forward(self, X: torch.Tensor) -> torch.Tensor:
