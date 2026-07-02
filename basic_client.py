@@ -5,8 +5,8 @@ import requests
 
 
 
-USER = "your-username-here"
-PASSWORD = "your-password-here"
+USER = "group14"
+PASSWORD = "ip00y-p92nc-9smqo"
 BASE_URL = "https://mlme26biosim.org"
 
 # Basic use:
