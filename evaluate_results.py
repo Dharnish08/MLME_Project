@@ -8,7 +8,7 @@ from botorch import fit_gpytorch_mll
 from botorch.acquisition import PosteriorMean
 from botorch.acquisition.fixed_feature import FixedFeatureAcquisitionFunction
 from botorch.optim.optimize import optimize_acqf
-from mfbo_v1 import problem
+from mfbo_v1 import problem, FidelityScaler
 from basic_client import BioreactorClient
 
 tkwargs = {
@@ -42,14 +42,14 @@ client.login(USER, PASSWORD)
 def evaluate_final_model(csv_path):
     print("Load data from csv file...")
     df = pd.DataFrame(pd.read_csv(csv_path))
-    
+    scaler = FidelityScaler()
     feature_cols = ["T", "pH_Wert", "F1", "F2", "F3", "Fidelity_Scaled"]
     train_x = torch.tensor(df[feature_cols].values, **tkwargs)
     train_obj = torch.tensor(df["Targetvalue_Y"].values, **tkwargs).unsqueeze(-1)
-    
+    train_obj_norm = scaler.transform(train_x, train_obj)
     print("Train final model with all data...")
     model = SingleTaskMultiFidelityGP(
-        train_x, train_obj, outcome_transform=Standardize(m=1), data_fidelities=[5]
+        train_x, train_obj_norm, data_fidelities=[5]
     )
     mll = ExactMarginalLogLikelihood(model.likelihood, model)
     fit_gpytorch_mll(mll)
@@ -69,6 +69,7 @@ def evaluate_final_model(csv_path):
     final_rec_y_real, _ = problem(final_rec_x_full)
 
     best_y_val = final_rec_y.item()
+    best_y_val_denorm = scaler.denormalize(best_y_val, fidelity=1.0).item()
     best_y_val_real = final_rec_y_real.item()
 
     mins = torch.tensor([r[0] for r in VARIABLE_RANGES.values()], **tkwargs)
@@ -77,7 +78,7 @@ def evaluate_final_model(csv_path):
     final_rec_x_denormal = mins + final_rec_x[0:5] * (maxs - mins)
 
     print(f"\n=== FINAL MODEL-ANALYSis ===")
-    print(f"Best theorticall value (Pilot): {best_y_val:.3f}")
+    print(f"Best theorticall value (Pilot): {best_y_val_denorm:.3f}")
     print(f"Best real value (Pilot):        {best_y_val_real:.3f}")
     print(f"Optimal recipe (denormalised):     {final_rec_x_denormal.squeeze().tolist()}")
     
@@ -247,7 +248,8 @@ def plot_exploration_and_yield(csv_path="results/optimization_log.csv"):
 
 if __name__ == "__main__":
     # Trage hier den korrekten Namen deiner aktuellsten Log-Datei ein!
-    DATEINAME = "results\optimization_log_2026-07-01_22-48-00.csv"
+    DATEINAME = r"results\optimization_log_2026-07-07_22-52-30.csv"
     plot_exploration_and_yield(DATEINAME)
     model, daten_df = evaluate_final_model(DATEINAME)
-    plot_fast_convergence(daten_df)
+    
+    #plot_fast_convergence(daten_df)

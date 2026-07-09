@@ -50,7 +50,8 @@ client = BioreactorClient(BASE_URL)
 client.login(USER, PASSWORD)
 
 fidelities = [0, 0.5, 1]
-fidelities_costs = [0.1, 0.5, 1]
+fidelities_costs = [0.75, 0.85, 1]
+fidelities_real_costs = [10, 500, 2000]
 
 def problem(args):
     args_2d = args.view(-1, args.shape[-1])
@@ -102,7 +103,7 @@ def generate_initial_data(n):
 
     train_x = torch.tensor(sample, **tkwargs)
 
-    fidelities_list = [0.0]*56 + [0.5]*6 + [1.0]*2
+    fidelities_list = [0.0]*60 + [0.5]*3 + [1.0]*1
     train_f_unshuffled = torch.tensor(fidelities_list, **tkwargs).unsqueeze(-1)
     
     shuffle_indices = torch.randperm(n)
@@ -253,10 +254,7 @@ def optimize_mfkg_and_get_observation(mfkg_acqf):
 
     # observe new values
     new_x = candidates.detach()
-    new_obj, cost = problem(new_x)
-    print(f"candidate:{new_x}\n")
-    print(f"observation:{new_obj}\n\n")
-    return new_x, new_obj, cost
+    return new_x
 
 def get_recommendation(model):
     rec_acqf = FixedFeatureAcquisitionFunction(
@@ -373,6 +371,7 @@ if __name__ == "__main__":
                 print(f"\n[Intervention] 80 runs without pilot. Enforce Pilot run at optimum")
                 new_x = pred_opt_x.clone()
                 new_x[0, 5] = 1.0  # Fidelity auf Pilot
+                cumulative_cost += fidelities_real_costs[int(new_x[0,5]*2)]
                 new_obj, cost = problem(new_x)
                 
                 # Zähler resetten (Ein Pilot-Versuch durchbricht auch jede Micro-Streak)
@@ -384,6 +383,7 @@ if __name__ == "__main__":
                 print(f"\n[Intervention] 20 Micro-Attempts in row. Enforce Bench-calibration")
                 new_x = pred_opt_x.clone()
                 new_x[0, 5] = 0.5  
+                cumulative_cost += fidelities_real_costs[int(new_x[0,5]*2)]
                 new_obj, cost = problem(new_x)
                 
                 micro_streak = 0
@@ -394,8 +394,11 @@ if __name__ == "__main__":
             
             # regular run without intervention
             else:
-                new_x, new_obj, cost = optimize_mfkg_and_get_observation(mfkg_acqf)
-                
+                new_x = optimize_mfkg_and_get_observation(mfkg_acqf)
+                cumulative_cost += fidelities_real_costs[int(new_x[0,5]*2)]
+                new_obj, cost = problem(new_x)
+                print(f"candidate:{new_x}\n")
+                print(f"observation:{new_obj}\n\n")
                 # Prüfen, was die KI freiwillig gewählt hat
                 new_fidelity = int(round(new_x[0, 5].item() * 2.0))
                 
@@ -412,7 +415,7 @@ if __name__ == "__main__":
             train_x = torch.cat([train_x, new_x])
             train_obj = torch.cat([train_obj, new_obj])
             
-            cumulative_cost += cost
+
 
             save_step_to_csv(
                 iteration=i + 1, new_x=new_x, new_obj=new_obj, cost=cost, 
