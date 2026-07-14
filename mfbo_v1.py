@@ -22,6 +22,7 @@ import numpy as np
 from matplotlib.colors import ListedColormap
 from datetime import datetime
 
+"""Bayesian optimization loop."""
 
 SMOKE_TEST = False
 
@@ -34,8 +35,7 @@ USER = "group14"
 PASSWORD = "ip00y-p92nc-9smqo"
 BASE_URL = "https://mlme26biosim.org"
 
-# Parameter
-
+# Parameter ranges for the reactor recipe variables.
 VARIABLE_RANGES = {
     "T": (20.0, 60.0),
     "pH": (3.0, 9.5),
@@ -54,6 +54,7 @@ fidelities_costs = [0.75, 0.85, 1]
 fidelities_real_costs = [10, 500, 2000]
 
 def problem(args):
+    """Run the selected recipe at the requested fidelity and return the outcome."""
     args_2d = args.view(-1, args.shape[-1])
     
     # Tensoren für die Skalierung bereitstellen
@@ -86,7 +87,8 @@ def problem(args):
     return result_Y, total_cost
 
 def generate_initial_data(n):
-    # generate training data within the declared bounds
+    """Create the initial training set for the surrogate model."""
+    # Generate training data within the declared bounds.
     train_x = torch.empty(n, 5, **tkwargs)
 
     # # sample the 5 recipe variables from their actual ranges
@@ -116,6 +118,8 @@ def generate_initial_data(n):
     return train_x_full, train_obj, inital_cost
 
 class CustomStaircaseCostModel(DeterministicModel):
+    """Cost model with discrete fidelity-dependent penalties."""
+
     def __init__(self, fidelity_idx: int = -1, device=None, dtype=None) -> None:
         super().__init__()
         self.fidelity_idx = fidelity_idx
@@ -133,6 +137,8 @@ class CustomStaircaseCostModel(DeterministicModel):
 
 
 class FidelityScaler:
+    """Normalize objective values per fidelity level."""
+
     def __init__(self):
         self.stats = {}
 
@@ -197,6 +203,7 @@ class FidelityScaler:
 
 
 def initialize_model(train_x, train_obj):
+    """Build and initialize the multi-fidelity Gaussian process model."""
     model = SingleTaskMultiFidelityGP(
         train_x, train_obj, data_fidelities=[5]
     )
@@ -207,6 +214,7 @@ def project(X):
     return project_to_target_fidelity(X=X, target_fidelities=target_fidelities, d=6)
 
 def get_mfkg(model):
+    """Create the cost-aware acquisition function for the next query."""
     cost_model = CustomStaircaseCostModel(fidelity_idx=5, **tkwargs)
     cost_aware_utility = InverseCostWeightedUtility(cost_model=cost_model)
 
@@ -237,7 +245,7 @@ def get_mfkg(model):
     return mfkg, current_x_full, current_value
 
 def optimize_mfkg_and_get_observation(mfkg_acqf):
-    """Optimizes MFKG and returns a new candidate, observation, and cost."""
+    """Optimize the acquisition function and return a new candidate."""
 
     # generate new candidates
     print('optimizing mfkg')
@@ -257,6 +265,7 @@ def optimize_mfkg_and_get_observation(mfkg_acqf):
     return new_x
 
 def get_recommendation(model):
+    """Return the final recommendation from the fitted model."""
     rec_acqf = FixedFeatureAcquisitionFunction(
         acq_function=PosteriorMean(model, maximize=True),
         d=6,
@@ -279,6 +288,7 @@ def get_recommendation(model):
     return final_rec, expected_value
 
 def save_step_to_csv(iteration, new_x, new_obj, cost, cumulative_cost, pred_x=None, pred_y=None, scaler=None, folder="results", filename="optimization_log.csv"):
+    """Append one optimization step to a CSV log."""
     os.makedirs(folder, exist_ok=True)
     filepath = os.path.join(folder, filename)
 
@@ -325,7 +335,8 @@ def save_step_to_csv(iteration, new_x, new_obj, cost, cumulative_cost, pred_x=No
     df.to_csv(filepath, mode='a', index=False, header=not file_exists)
 
 if __name__ == "__main__":
-    # run optimization
+    """Run the full Bayesian optimization loop with fidelity interventions."""
+    # Run the optimization loop.
     target_fidelities = {5: 1}
     bounds = torch.tensor(
     [[0.0, 0.0, 0.0, 0.0, 0.0, 0.0],

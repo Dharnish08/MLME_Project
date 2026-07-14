@@ -19,6 +19,7 @@ from scipy.stats import qmc
 import numpy as np
 from datetime import datetime
 
+"""Bayesian optimization loop for the Beat-the-Felix benchmark."""
 
 SMOKE_TEST = False
 
@@ -31,8 +32,7 @@ USER = "group14"
 PASSWORD = "ip00y-p92nc-9smqo"
 BASE_URL = "https://mlme26biosim.org"
 
-# Parameter
-
+# Parameter ranges for the reactor recipe variables.
 VARIABLE_RANGES = {
     "T": (20.0, 60.0),
     "pH": (3.0, 9.5),
@@ -58,6 +58,7 @@ fidelities_costs = [0.85, 0.9, 1]
 fidelities_real_costs = [10, 500, 2000]
 
 def problem(args):
+    """Run the selected recipe at the requested fidelity and return the outcome."""
     args_2d = args.view(-1, args.shape[-1])
     
     # Tensoren für die Skalierung bereitstellen
@@ -90,7 +91,8 @@ def problem(args):
     return result_Y, total_cost
 
 def generate_initial_data(n):
-    # generate training data within the declared bounds
+    """Create the initial training set for the surrogate model."""
+    # Generate training data within the declared bounds.
     train_x = torch.empty(n, 5, **tkwargs)
 
     # # sample the 5 recipe variables from their actual ranges
@@ -120,6 +122,8 @@ def generate_initial_data(n):
     return train_x_full, train_obj, inital_cost
 
 class CustomStaircaseCostModel(DeterministicModel):
+    """Cost model with discrete fidelity-dependent penalties."""
+
     def __init__(self, fidelity_idx: int = -1, device=None, dtype=None) -> None:
         super().__init__()
         self.fidelity_idx = fidelity_idx
@@ -137,6 +141,8 @@ class CustomStaircaseCostModel(DeterministicModel):
 
 
 class FidelityScaler:
+    """Normalize objective values per fidelity level."""
+
     def __init__(self):
         self.stats = {}
 
@@ -201,6 +207,7 @@ class FidelityScaler:
 
 
 def initialize_model(train_x, train_obj):
+    """Build and initialize the multi-fidelity Gaussian process model."""
     model = SingleTaskMultiFidelityGP(
         train_x, train_obj, data_fidelities=[5]
     )
@@ -211,6 +218,7 @@ def project(X):
     return project_to_target_fidelity(X=X, target_fidelities=target_fidelities, d=6)
 
 def get_mfkg(model):
+    """Create the cost-aware acquisition function for the next query."""
     cost_model = CustomStaircaseCostModel(fidelity_idx=5, **tkwargs)
     cost_aware_utility = InverseCostWeightedUtility(cost_model=cost_model)
 
@@ -241,7 +249,7 @@ def get_mfkg(model):
     return mfkg, current_x_full, current_value
 
 def optimize_mfkg_and_get_observation(mfkg_acqf):
-    """Optimizes MFKG and returns a new candidate, observation, and cost."""
+    """Optimize the acquisition function and return a new candidate."""
 
     # generate new candidates
     print('optimizing mfkg')
@@ -261,6 +269,7 @@ def optimize_mfkg_and_get_observation(mfkg_acqf):
     return new_x
 
 def get_recommendation(model):
+    """Return the final recommendation from the fitted model."""
     rec_acqf = FixedFeatureAcquisitionFunction(
         acq_function=PosteriorMean(model, maximize=True),
         d=6,
@@ -283,6 +292,7 @@ def get_recommendation(model):
     return final_rec, expected_value
 
 def save_step_to_csv(iteration, new_x, new_obj, cost, cumulative_cost, pred_x=None, pred_y=None, scaler=None, folder="results", filename="optimization_log.csv"):
+    """Append one optimization step to a CSV log."""
     os.makedirs(folder, exist_ok=True)
     filepath = os.path.join(folder, filename)
 
@@ -329,7 +339,8 @@ def save_step_to_csv(iteration, new_x, new_obj, cost, cumulative_cost, pred_x=No
     df.to_csv(filepath, mode='a', index=False, header=not file_exists)
 
 def baysian_optimization():
-    # run optimization
+    """Run the full Bayesian optimization loop with fidelity interventions."""
+    # Run the optimization loop.
     aktuelles_datum = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     log_datei_name = f"optimization_log_{aktuelles_datum}.csv"
     print(f"This run will be saved in: results/{log_datei_name}")
@@ -365,7 +376,7 @@ def baysian_optimization():
             fit_gpytorch_mll(mll)
             mfkg_acqf, pred_opt_x, pred_opt_y = get_mfkg(model)
             
-            # ensures a pilot run after 80 iterations
+            # Enforce a pilot run after many bench-only steps.
             if schritte_ohne_pilot >= 80:
                 print(f"\n[Intervention] 80 runs without pilot. Enforce Pilot run at optimum")
                 new_x = pred_opt_x.clone()
@@ -380,7 +391,7 @@ def baysian_optimization():
                 schritte_ohne_pilot = 0 
                 micro_streak = 0
                 
-            # ensures a bench run every 25 iterations
+            # Enforce a bench check after repeated micro steps.
             elif micro_streak >= 20:
                 print(f"\n[Intervention] 20 Micro-Attempts in row. Enforce Bench-calibration")
                 new_x = pred_opt_x.clone()
@@ -397,7 +408,7 @@ def baysian_optimization():
                 if schritte_ohne_pilot > 70:
                     schritte_ohne_pilot = 70
             
-            # regular run without intervention
+            # Regular acquisition step without forced intervention.
             else:
                 new_x = optimize_mfkg_and_get_observation(mfkg_acqf)
                 cost_next_step = fidelities_real_costs[int(new_x[0,5]*2)]

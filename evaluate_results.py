@@ -1,3 +1,5 @@
+"""Evaluate and visualize the optimization results."""
+
 import pandas as pd
 import torch
 import matplotlib.pyplot as plt
@@ -40,6 +42,7 @@ client = BioreactorClient(BASE_URL)
 client.login(USER, PASSWORD)
 
 def evaluate_final_model(csv_path):
+    """Fit the final model and return the best recommendation."""
     print("Load data from csv file...")
     df = pd.DataFrame(pd.read_csv(csv_path))
     scaler = FidelityScaler()
@@ -48,6 +51,7 @@ def evaluate_final_model(csv_path):
     train_obj = torch.tensor(df["Targetvalue_Y"].values, **tkwargs).unsqueeze(-1)
     train_obj_norm = scaler.transform(train_x, train_obj)
     print("Train final model with all data...")
+    # Fit the surrogate model on all available data.
     model = SingleTaskMultiFidelityGP(
         train_x, train_obj_norm, data_fidelities=[5]
     )
@@ -85,9 +89,9 @@ def evaluate_final_model(csv_path):
     return model, df
 
 def plot_fast_convergence(df):
-
+    """Compare model predictions with real outcomes over time."""
     print("\nStart evaluating previous results...")
-    
+    # Keep only pilot observations for the running maximum.
     df['Pilot_Y_Only'] = df['Targetvalue_Y'].where(df['Fidelity_Index'] == 2)
     
     df['Running_Max_Y'] = df['Pilot_Y_Only'].cummax().ffill()
@@ -149,11 +153,7 @@ def plot_fast_convergence(df):
     plt.show()
 
 def plot_exploration_and_yield(csv_path="results/optimization_log.csv"):
-    """
-    Erstellt ein 2-zeiliges Dashboard:
-    Oben: Parameter-Exploration (Größe der Punkte = relativer Ertrag PRO Fidelity)
-    Unten: Zeitlicher Verlauf des echten Ertrags
-    """
+    """Create a two-row dashboard for exploration and yield trends."""
     print("Lese CSV-Datei für die erweiterte Exploration ein...")
     df = pd.read_csv(csv_path)
     
@@ -170,9 +170,7 @@ def plot_exploration_and_yield(csv_path="results/optimization_log.csv"):
     colors = {0: 'lightblue', 1: 'orange', 2: 'red'}
     labels = {0: 'Micro (f=0)', 1: 'Bench (f=0.5)', 2: 'Pilot (f=1.0)'}
     
-    # ==========================================
-    # NEU: Relative Skalierung PRO Fidelity-Ebene
-    # ==========================================
+    # Scale bubble size per fidelity level.
     df['BubbleSize'] = 50.0  # Fallback-Standardgröße
     
     for fid in [0, 1, 2]:
@@ -187,9 +185,7 @@ def plot_exploration_and_yield(csv_path="results/optimization_log.csv"):
             else:
                 df.loc[mask, 'BubbleSize'] = 50.0
 
-    # ==========================================
-    # OBERE ZEILE: PARAMETER-SPUREN
-    # ==========================================
+    # Top row: parameter traces over iterations.
     for i, param in enumerate(params):
         ax = axes_params[i]
         
@@ -227,9 +223,7 @@ def plot_exploration_and_yield(csv_path="results/optimization_log.csv"):
                         color='green', linewidth=1.5, linestyle='-', alpha=0.9,
                         label=label_pred)
 
-    # ==========================================
-    # UNTERE ZEILE: ECHTER ERTRAG (Targetvalue_Y)
-    # ==========================================
+    # Bottom row: measured yield over time.
     for fid in [0, 1, 2]:
         mask = df['Fidelity_Index'] == fid
         if mask.sum() > 0:
@@ -255,7 +249,7 @@ def plot_exploration_and_yield(csv_path="results/optimization_log.csv"):
     plt.show()
 
 if __name__ == "__main__":
-    # Trage hier den korrekten Namen deiner aktuellsten Log-Datei ein!
+    # Set the current optimization log file.
     DATEINAME = r"results\optimization_log_2026-07-11_06-38-26.csv"
     plot_exploration_and_yield(DATEINAME)
     model, daten_df = evaluate_final_model(DATEINAME)
