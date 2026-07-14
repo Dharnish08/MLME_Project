@@ -131,8 +131,8 @@ if __name__ == "__main__":
     **tkwargs
 )
     # neter number of experiments for each scale
-    micro = 350
-    bench = 11
+    micro = 250
+    bench = 9
     pilot = 3
     n = micro+bench+pilot
     aktuelles_datum = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")

@@ -95,7 +95,7 @@ def plot_fast_convergence(df):
     df['Running_Max_Y'] = df['Running_Max_Y'].bfill()
     
     df_opt = df[df['Iteration'] > 0].copy()
-    
+    df_opt = df_opt.iloc[:-1]
     cumulative_costs = df_opt["Cost_Cummulated"].values
     predicted_max_y = df_opt["Pred_Max_Y"].values
     real_max_y = df_opt["Running_Max_Y"].values
@@ -218,6 +218,14 @@ def plot_exploration_and_yield(csv_path="results/optimization_log.csv"):
         col_name = f"Pred_Opt_{param}" if f"Pred_Opt_{param}" in df.columns else f"Pred_Opt_{param.split('_')[0]}"
         if col_name in df.columns and pd.notna(df[col_name].iloc[-1]):
             ax.axhline(df[col_name].iloc[-1], color='green', linestyle=':', alpha=0.8)
+        # Plot per-iteration predicted optimum for this parameter (if available)
+        if col_name in df.columns:
+            pred_param = pd.to_numeric(df[col_name], errors='coerce')
+            if pred_param.notna().any():
+                label_pred = 'Model predicted optimum' if i == 0 else None
+                ax.plot(df['Iteration'].values, pred_param.values,
+                        color='green', linewidth=1.5, linestyle='-', alpha=0.9,
+                        label=label_pred)
 
     # ==========================================
     # UNTERE ZEILE: ECHTER ERTRAG (Targetvalue_Y)
@@ -248,8 +256,8 @@ def plot_exploration_and_yield(csv_path="results/optimization_log.csv"):
 
 if __name__ == "__main__":
     # Trage hier den korrekten Namen deiner aktuellsten Log-Datei ein!
-    DATEINAME = r"results\optimization_log_2026-07-07_22-52-30.csv"
+    DATEINAME = r"results\optimization_log_2026-07-11_06-38-26.csv"
     plot_exploration_and_yield(DATEINAME)
     model, daten_df = evaluate_final_model(DATEINAME)
     
-    #plot_fast_convergence(daten_df)
+    plot_fast_convergence(daten_df)

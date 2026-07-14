@@ -232,7 +232,7 @@ def get_mfkg(model):
 
     mfkg = qMultiFidelityKnowledgeGradient(
         model=model,
-        num_fantasies=16 if not SMOKE_TEST else 2,
+        num_fantasies=32 if not SMOKE_TEST else 2,
         current_value=current_value,
         cost_aware_utility=cost_aware_utility,
         project=project,
@@ -354,11 +354,12 @@ def baysian_optimization():
         )
 
     N_ITER = 500 if not SMOKE_TEST else 3
+    MAX_COST = 13000
     i=0
     micro_streak = 0
     schritte_ohne_pilot = 0
     try:
-        while i < N_ITER and cumulative_cost<13000:
+        while i < N_ITER:
             train_obj_norm = scaler.transform(train_x, train_obj)
             mll, model = initialize_model(train_x, train_obj_norm)
             fit_gpytorch_mll(mll)
@@ -369,21 +370,27 @@ def baysian_optimization():
                 print(f"\n[Intervention] 80 runs without pilot. Enforce Pilot run at optimum")
                 new_x = pred_opt_x.clone()
                 new_x[0, 5] = 1.0  # Fidelity auf Pilot
-                cumulative_cost += fidelities_real_costs[int(new_x[0,5]*2)]
+                cost_next_step = fidelities_real_costs[int(new_x[0,5]*2)]
+                if cumulative_cost + cost_next_step >= MAX_COST:
+                    print("Reached maximum cost!")
+                    break
                 new_obj, cost = problem(new_x)
-                
+                cumulative_cost += cost
                 # Zähler resetten (Ein Pilot-Versuch durchbricht auch jede Micro-Streak)
                 schritte_ohne_pilot = 0 
                 micro_streak = 0
                 
             # ensures a bench run every 25 iterations
-            elif micro_streak >= 25:
-                print(f"\n[Intervention] 25 Micro-Attempts in row. Enforce Bench-calibration")
+            elif micro_streak >= 20:
+                print(f"\n[Intervention] 20 Micro-Attempts in row. Enforce Bench-calibration")
                 new_x = pred_opt_x.clone()
                 new_x[0, 5] = 0.5  
-                cumulative_cost += fidelities_real_costs[int(new_x[0,5]*2)]
+                cost_next_step = fidelities_real_costs[int(new_x[0,5]*2)]
+                if cumulative_cost + cost_next_step >= MAX_COST:
+                    print("Reached maximum cost!")
+                    break
                 new_obj, cost = problem(new_x)
-                
+                cumulative_cost += cost
                 micro_streak = 0
                 schritte_ohne_pilot += 1
                 
@@ -393,8 +400,12 @@ def baysian_optimization():
             # regular run without intervention
             else:
                 new_x = optimize_mfkg_and_get_observation(mfkg_acqf)
-                cumulative_cost += fidelities_real_costs[int(new_x[0,5]*2)]
+                cost_next_step = fidelities_real_costs[int(new_x[0,5]*2)]
+                if cumulative_cost + cost_next_step >= MAX_COST:
+                    print("Reached maximum cost!")
+                    break
                 new_obj, cost = problem(new_x)
+                cumulative_cost += cost
                 print(f"candidate:{new_x}\n")
                 print(f"observation:{new_obj}\n\n")
                 # Prüfen, was die KI freiwillig gewählt hat
@@ -441,7 +452,7 @@ def baysian_optimization():
     return objective_value, cumulative_cost, n_pilot
 
 if __name__ == "__main__":
-    N_TRIALS = 10
+    N_TRIALS = 1
     trial_yields: list[float] = []
     trial_costs: list[float] = []
     trial_n_pilot: list[float] = []
