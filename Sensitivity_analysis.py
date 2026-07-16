@@ -1,4 +1,22 @@
-"""Run global sensitivity analysis for the optimization model."""
+"""Run global sensitivity analysis for the optimization model.
+
+SUPERSEDED by ``task5_sensitivity.py`` -- use that instead.
+
+This file is kept only because ``run_real_pilot_gsa`` (a GSA against the real
+API, rather than the surrogate) is an idea worth keeping. Two things about it
+had to be disarmed first; see ``task5_gsa_postmortem.md`` for the full write-up.
+
+  1. COST. ``saltelli.sample(problem, N)`` returns N*(2D+2) rows, NOT N. At the
+     N=16 this file used, that is 192 real PILOT runs = 384,000 EUR, against a
+     15,000 EUR benchmark budget -- and it was the live call in __main__. It now
+     refuses to run without an explicit cost acknowledgement.
+  2. The pilot-level surrogate GSA this file performs is the analysis that
+     produced our wrong "T is inert" conclusion. ``task5_sensitivity.py`` now
+     runs it at every fidelity with a design-coverage gate.
+
+Note: importing this module imports ``mfbo_v1``, which logs into the API at
+import time. ``problem()`` likewise performs a real (billed) API call.
+"""
 
 import os
 import torch
@@ -67,10 +85,20 @@ def run_global_sensitivity_analysis(model, scaler):
         
     return Si
 
-def run_real_pilot_gsa(client):
-    """Run Sobol analysis with real pilot API evaluations."""
+PILOT_COST_EUR = 2000.0
+
+
+def run_real_pilot_gsa(client, n_base=16, budget_eur=0.0):
+    """Run Sobol analysis with real pilot API evaluations.
+
+    Saltelli expands n_base to n_base*(2D+2) runs -- at D=5 that is 12x the
+    number you typed. Every row is a billed pilot run, so the sample count is
+    computed and checked against ``budget_eur`` BEFORE anything is spent.
+    Caller must pass the budget it is willing to spend; the default of 0
+    means the function reports the cost and refuses to run.
+    """
     print("\n--- Start global sensitivity analysis with real pilot runs ---")
-    
+
     # Define the real-parameter bounds.
     problem_def = {
         'num_vars': 5,
@@ -85,21 +113,44 @@ def run_real_pilot_gsa(client):
     }
     
     # Generate Saltelli samples.
-    X_samples = saltelli.sample(problem_def, 16) 
-    
-    # Store the real outcomes.
-    Y_results = np.zeros(X_samples.shape[0])
+    X_samples = saltelli.sample(problem_def, n_base)
+
+    # ---- cost gate: price the run before spending a cent ----
+    n_runs = X_samples.shape[0]
+    est_cost = n_runs * PILOT_COST_EUR
+    print(f"n_base={n_base} expands to {n_runs} pilot runs "
+          f"(Saltelli returns n_base*(2D+2), not n_base).")
+    print(f"Estimated cost: {est_cost:,.0f} EUR. Authorised: {budget_eur:,.0f} EUR.")
+    if est_cost > budget_eur:
+        raise SystemExit(
+            f"REFUSING TO RUN: {n_runs} pilot runs would cost {est_cost:,.0f} EUR, "
+            f"but only {budget_eur:,.0f} EUR is authorised.\n"
+            f"For reference the project benchmark spends 15,000 EUR IN TOTAL.\n"
+            f"If you really mean it, pass budget_eur explicitly. To fit a budget "
+            f"B, use\n  n_base <= B / ({PILOT_COST_EUR:.0f} * 12)  "
+            f"-- e.g. 12,000 EUR allows n_base=0, i.e. this analysis does not fit.\n"
+            f"A Sobol GSA on the real pilot scale is not affordable here; use the "
+            f"surrogate\n(task5_sensitivity.py), or spend the budget on a 1-D "
+            f"sweep of T/pH instead --\nsee task5_gsa_postmortem.md section 6.")
+
+    # Store the real outcomes. NaN, not zeros: an unfilled row must poison the
+    # analysis loudly rather than silently read as "Y = 0".
+    Y_results = np.full(n_runs, np.nan)
     total_cost_gsa = 0.0
-    
+
     # Evaluate each point with the API at pilot fidelity.
     for i, row in enumerate(X_samples):
         result = client.run("pilot", row[0], row[1], row[2], row[3], row[4])
-        
+
         Y_results[i] = result['Y']
         total_cost_gsa += result['cost_eur']
-        
+
         print(f"Run {i+1}/{len(X_samples)} finished. Current GSA cost: {total_cost_gsa} EUR")
-        
+
+    if np.isnan(Y_results).any():
+        raise SystemExit(f"{int(np.isnan(Y_results).sum())} runs never returned "
+                         f"a value; refusing to analyse a partial sample.")
+
     # Run Sobol analysis on the real outcomes.
     Si = sobol.analyze(problem_def, Y_results, print_to_console=False)
     
@@ -108,8 +159,39 @@ def run_real_pilot_gsa(client):
     print("-" * 55)
     for i, name in enumerate(problem_def['names']):
         print(f"{name:<10} | {Si['S1'][i]:<20.4f} | {Si['ST'][i]:<20.4f}")
-        
+
+    check_sobol_validity(Si, problem_def['names'])
     return Si
+
+
+def check_sobol_validity(Si, names):
+    """Assert the identities a real Sobol estimate cannot violate.
+
+    For independent inputs ST_i >= S1_i always, and sum(S1) <= sum(ST). A
+    violation means the estimate is not measuring the process -- too few
+    samples, a misaligned Y vector, or swapped columns -- and the indices must
+    not be read as results. Printing this next to the table (rather than
+    trusting the reader to check) is the guard that was missing when two of our
+    GSAs disagreed.
+    """
+    s1 = np.asarray(Si['S1'], dtype=float)
+    st = np.asarray(Si['ST'], dtype=float)
+    bad = [n for n, a, b in zip(names, s1, st) if b < a]
+    if bad or s1.sum() > st.sum():
+        print("\n*** THESE INDICES ARE NOT VALID -- DO NOT REPORT THEM. ***")
+        if bad:
+            print(f"    ST < S1 for: {', '.join(bad)}. Sobol guarantees "
+                  f"ST >= S1 for independent inputs.")
+        if s1.sum() > st.sum():
+            print(f"    sum(S1)={s1.sum():.3f} > sum(ST)={st.sum():.3f}, "
+                  f"which is impossible.")
+        print("    Likely causes: too few samples for the noise level; Y not "
+              "aligned with the\n    sample matrix; or the S1/ST columns "
+              "swapped where they are printed.")
+    else:
+        print(f"\n[validity ok] ST >= S1 for all inputs; "
+              f"sum(S1)={s1.sum():.3f} <= sum(ST)={st.sum():.3f}.")
+    return not bad
 
 tkwargs = {
     "dtype": torch.double,
@@ -136,11 +218,21 @@ VARIABLE_RANGES = {
 
 SCALES = ["micro", "bench", "pilot"]
 
-client = BioreactorClient(BASE_URL)
-client.login(USER, PASSWORD)
 
-def evaluate_final_model(csv_path):
-    """Fit the final model and return the best recommendation."""
+def get_client():
+    """Authenticate lazily -- importing this module must not log in or spend."""
+    c = BioreactorClient(BASE_URL)
+    c.login(USER, PASSWORD)
+    return c
+
+
+def evaluate_final_model(csv_path, verify_with_api=False):
+    """Fit the final model and return the best recommendation.
+
+    verify_with_api=True runs the recommended recipe on the REAL pilot reactor
+    via ``problem()`` -- one billed run at 2000 EUR. Off by default: this used
+    to fire on every invocation of this script.
+    """
     print("Load data from csv file...")
     df = pd.DataFrame(pd.read_csv(csv_path))
     scaler = FidelityScaler()
@@ -168,11 +260,9 @@ def evaluate_final_model(csv_path):
     )
     
     final_rec_x_full = rec_acqf._construct_X_full(final_rec_x)
-    final_rec_y_real, _ = problem(final_rec_x_full)
 
     best_y_val = final_rec_y.item()
     best_y_val_denorm = scaler.denormalize(best_y_val, fidelity=1.0).item()
-    best_y_val_real = final_rec_y_real.item()
 
     mins = torch.tensor([r[0] for r in VARIABLE_RANGES.values()], **tkwargs)
     maxs = torch.tensor([r[1] for r in VARIABLE_RANGES.values()], **tkwargs)
@@ -181,9 +271,15 @@ def evaluate_final_model(csv_path):
 
     print(f"\n=== FINAL MODEL-ANALYSis ===")
     print(f"Best theorticall value (Pilot): {best_y_val_denorm:.3f}")
-    print(f"Best real value (Pilot):        {best_y_val_real:.3f}")
     print(f"Optimal recipe (denormalised):     {final_rec_x_denormal.squeeze().tolist()}")
-    
+
+    if verify_with_api:
+        # One real pilot run at 2000 EUR -- opt-in only.
+        print("Verifying the recommendation on the REAL pilot reactor "
+              "(2000 EUR)...")
+        final_rec_y_real, _ = problem(final_rec_x_full)
+        print(f"Best real value (Pilot):        {final_rec_y_real.item():.3f}")
+
     return model, df, scaler
 
 
@@ -191,8 +287,20 @@ def evaluate_final_model(csv_path):
 
 
 if __name__ == "__main__":
-    # Set the current optimization log file.
-    DATEINAME = r"results\optimization_log_2026-07-11_09-43-48.csv"
-    model, daten_df, scaler = evaluate_final_model(DATEINAME)
+    print(__doc__)
+    print("Run `python task5_sensitivity.py` for the maintained analysis.\n"
+          "Nothing here runs by default -- every path below costs real money.")
+
+    # The free, offline analysis. Superseded by task5_sensitivity.py, which
+    # additionally gates each index on whether the design varied that input.
+    #
+    # DATEINAME = os.path.join("results",
+    #                          "optimization_log_2026-07-11_09-43-48.csv")
+    # model, daten_df, scaler = evaluate_final_model(DATEINAME)
     # run_global_sensitivity_analysis(model, scaler)
-    run_real_pilot_gsa(client)
+
+    # A real-API GSA. Left here as a deliberate, priced decision -- 384,000 EUR
+    # at n_base=16 -- not as a default. See the cost gate in the function and
+    # task5_gsa_postmortem.md section 6 for the affordable alternative.
+    #
+    # run_real_pilot_gsa(get_client(), n_base=16, budget_eur=0.0)
