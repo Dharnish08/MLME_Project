@@ -1,18 +1,23 @@
 from pathlib import Path
+from typing import Optional
 import argparse
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 
-# Project paths
+
+# Paths
 
 PROJECT_DIR = Path(__file__).resolve().parent
-RESULTS_DIR = PROJECT_DIR / "results"
-FIGURES_DIR = RESULTS_DIR / "figures_initial_experiments"
-TABLES_DIR = RESULTS_DIR / "tables_initial_experiments"
+DEFAULT_RESULTS_DIR = PROJECT_DIR / "results"
+
+# Outputs
+FIGURES_DIR = DEFAULT_RESULTS_DIR / "figures"
+TABLES_DIR = DEFAULT_RESULTS_DIR / "tables"
 
 FIGURES_DIR.mkdir(parents=True, exist_ok=True)
 TABLES_DIR.mkdir(parents=True, exist_ok=True)
+
 
 # Constants
 
@@ -36,26 +41,47 @@ SCALE_MAP = {
 
 # Utility functions
 
-def find_latest_log_file() -> Path:
-    """Find the newest optimization log inside the results folder."""
-    log_files = sorted(RESULTS_DIR.glob("optimization_log_*.csv"))
-
-    if not log_files:
-        raise FileNotFoundError(
-            f"No optimization_log_*.csv file found inside: {RESULTS_DIR}\n"
-            "Please run the optimization script first to generate a log."
-        )
-
-    return log_files[-1]
-
-
 def normalize_column_name(name: str) -> str:
-    """Remove surrounding spaces and compress internal whitespace."""
+    """Remove leading/trailing spaces and compress internal whitespace."""
     return " ".join(str(name).strip().split())
 
 
+def resolve_input_file(user_path: Optional[str], candidate_names: list[str]) -> Path:
+    """
+    Resolve input file path.
+
+    Search order:
+    1. user-provided path, if given
+    2. results/<candidate>
+    3. project root/<candidate>
+    """
+    if user_path is not None:
+        path = Path(user_path)
+        if not path.is_absolute():
+            path = PROJECT_DIR / path
+        if not path.exists():
+            raise FileNotFoundError(f"File not found: {path}")
+        return path
+
+    for name in candidate_names:
+        candidate = DEFAULT_RESULTS_DIR / name
+        if candidate.exists():
+            return candidate
+
+    for name in candidate_names:
+        candidate = PROJECT_DIR / name
+        if candidate.exists():
+            return candidate
+
+    raise FileNotFoundError(
+        "Could not find any of these files:\n"
+        + "\n".join(f" - {name}" for name in candidate_names)
+        + f"\nSearched in:\n - {DEFAULT_RESULTS_DIR}\n - {PROJECT_DIR}"
+    )
+
+
 def scale_normalized_to_real(df: pd.DataFrame) -> pd.DataFrame:
-    """Convert normalized recipe values from 0-1 to physical recipe units."""
+    """Convert normalized recipe variables from [0,1] to physical units."""
     df = df.copy()
 
     for var in RECIPE_COLUMNS:
@@ -66,24 +92,25 @@ def scale_normalized_to_real(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def load_and_clean_log(log_file: Path) -> pd.DataFrame:
+def load_and_clean_csv(path: Path, forced_scale: Optional[str] = None) -> pd.DataFrame:
     """
-    Load optimization log and clean column names.
+    Load one CSV and clean it into a common format.
 
-    This script expects the log, where recipe variables
-    are normalized and fidelity is stored as Fidelity_Index:
-        0 -> micro, 1 -> bench, 2 -> pilot
+    Expected input columns from the simulator/BO logs:
+        T, pH_Wert, F1, F2, F3, Fidelity_Index, Targetvalue_Y,
+        Step_Cost, Cost_Cummulated
+
+    Output columns:
+        scale, T_norm, pH_norm, F1_norm, F2_norm, F3_norm,
+        T, pH, F1, F2, F3, Y, cost_eur, cumulative_cost_eur
     """
-    df = pd.read_csv(log_file)
-
-    # Clean names like ' T       ' -> 'T'
+    df = pd.read_csv(path)
     df.columns = [normalize_column_name(c) for c in df.columns]
 
-    # Rename log columns to analysis-friendly names
     rename_map = {
         "T": "T_norm",
         "pH_Wert": "pH_norm",
-        "pH": "pH_norm",  # fallback
+        "pH": "pH_norm",
         "F1": "F1_norm",
         "F2": "F2_norm",
         "F3": "F3_norm",
@@ -96,62 +123,93 @@ def load_and_clean_log(log_file: Path) -> pd.DataFrame:
     df = df.rename(columns=rename_map)
 
     required = [
-        "Iteration", "T_norm", "pH_norm", "F1_norm", "F2_norm", "F3_norm",
+        "T_norm", "pH_norm", "F1_norm", "F2_norm", "F3_norm",
         "Fidelity_Index", "Y", "cost_eur", "cumulative_cost_eur",
     ]
 
     missing = [c for c in required if c not in df.columns]
     if missing:
-        print("Available columns after cleaning:")
+        print(f"\nAvailable columns in {path.name}:")
         for col in df.columns:
             print(" -", col)
-        raise ValueError(f"Missing required columns: {missing}")
+        raise ValueError(f"Missing required columns in {path.name}: {missing}")
 
-    # Convert important columns to numeric
     for col in required:
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    # Drop rows without measured Y or fidelity
-    df = df.dropna(subset=["Iteration", "Fidelity_Index", "Y"])
+    if "Iteration" in df.columns:
+        df["Iteration"] = pd.to_numeric(df["Iteration"], errors="coerce")
 
-    # Convert fidelity index to scale name
+    df = df.dropna(subset=[
+        "T_norm", "pH_norm", "F1_norm", "F2_norm", "F3_norm",
+        "Fidelity_Index", "Y",
+    ]).copy()
+
     df["Fidelity_Index"] = df["Fidelity_Index"].round().astype(int)
     df["scale"] = df["Fidelity_Index"].map(SCALE_MAP)
 
-    # Convert normalized recipe variables to physical units
+    if forced_scale is not None:
+        df["scale"] = forced_scale
+        reverse_map = {"micro": 0, "bench": 1, "pilot": 2}
+        df["Fidelity_Index"] = reverse_map[forced_scale]
+
     df = scale_normalized_to_real(df)
 
-    # Keep useful order, but preserve extra columns if needed
     useful = [
         "Iteration", "scale", "Fidelity_Index",
         "T_norm", "pH_norm", "F1_norm", "F2_norm", "F3_norm",
         "T", "pH", "F1", "F2", "F3",
         "Y", "cost_eur", "cumulative_cost_eur",
     ]
-    existing_useful = [c for c in useful if c in df.columns]
-    other_cols = [c for c in df.columns if c not in existing_useful]
-    df = df[existing_useful + other_cols]
+    useful_existing = [c for c in useful if c in df.columns]
+    other_cols = [c for c in df.columns if c not in useful_existing]
+    return df[useful_existing + other_cols]
+
+
+def add_recipe_id(df: pd.DataFrame, rounding_digits: int = 8) -> pd.DataFrame:
+    """
+    Add recipe_id by grouping the normalized recipe coordinates.
+
+    The noise/bias files contain 16 recipes repeated 10 times.
+    Since recipes are continuous, grouping is done after rounding.
+    """
+    df = df.copy()
+
+    rounded_cols = []
+    for col in NORMALIZED_COLUMNS:
+        rounded_col = f"{col}_rounded"
+        df[rounded_col] = df[col].round(rounding_digits)
+        rounded_cols.append(rounded_col)
+
+    # group ids are assigned based on unique rounded normalized recipes
+    df["recipe_id"] = df.groupby(rounded_cols, sort=True).ngroup() + 1
 
     return df
 
 
-def select_initial_iteration(df: pd.DataFrame) -> pd.DataFrame:
-    """Select only initial experiments."""
-    initial_df = df[df["Iteration"] == 0].copy()
+# Task 1: Y dependence visualizations
 
-    if len(initial_df) == 0:
-        raise ValueError(
-            "No rows with Iteration == 0 were found. "
-            "Cannot perform initial-iteration Task 1/2 analysis."
+def summarize_visualisation_data(vis_df: pd.DataFrame) -> pd.DataFrame:
+    """Create scale-wise summary for visualisation.csv."""
+    summary = (
+        vis_df.groupby("scale")
+        .agg(
+            count=("Y", "count"),
+            mean_Y=("Y", "mean"),
+            std_Y=("Y", "std"),
+            min_Y=("Y", "min"),
+            max_Y=("Y", "max"),
+            total_cost_eur=("cost_eur", "sum"),
         )
+        .reset_index()
+    )
 
-    return initial_df
+    summary.to_csv(TABLES_DIR / "visualisation_scale_summary.csv", index=False)
+    return summary
 
 
-# Task 1: visualizations from initial data
-
-def plot_y_vs_variables(df: pd.DataFrame) -> None:
-    """Create Y-vs-variable scatter plots with separate scale labels."""
+def plot_y_vs_variables(vis_df: pd.DataFrame) -> None:
+    """Plot product amount Y against each recipe variable for all scales."""
     labels = {
         "T": "Temperature T [°C]",
         "pH": "pH [-]",
@@ -164,327 +222,336 @@ def plot_y_vs_variables(df: pd.DataFrame) -> None:
         plt.figure(figsize=(7, 5))
 
         for scale in ["micro", "bench", "pilot"]:
-            subset = df[df["scale"] == scale]
+            subset = vis_df[vis_df["scale"] == scale]
             if len(subset) == 0:
                 continue
             plt.scatter(subset[var], subset["Y"], label=scale, alpha=0.75)
 
         plt.xlabel(labels[var])
         plt.ylabel("Product amount Y")
-        plt.title(f"Initial experiments: Y vs {var} at each scale")
+        plt.title(f"Y dependence on {var}")
         plt.legend()
         plt.grid(True)
         plt.tight_layout()
-        save_path = FIGURES_DIR / f"Initial_Y_vs_{var}.png"
+
+        save_path = FIGURES_DIR / f"Y_vs_{var}.png"
         plt.savefig(save_path, dpi=200)
         plt.close()
         print(f"Saved figure: {save_path}")
 
 
-def plot_y_distribution_by_scale(df: pd.DataFrame) -> None:
-    """Create a boxplot of Y by scale using initial experiments."""
+def plot_y_distribution_by_scale(vis_df: pd.DataFrame) -> None:
+    """Plot Y distribution by scale for visualisation.csv."""
     data = []
     labels = []
 
     for scale in ["micro", "bench", "pilot"]:
-        values = df.loc[df["scale"] == scale, "Y"].dropna().values
+        values = vis_df.loc[vis_df["scale"] == scale, "Y"].dropna().values
         if len(values) > 0:
             data.append(values)
             labels.append(scale)
 
     if not data:
-        print("No scale data available for Y distribution plot.")
+        print("No data available for Y distribution plot.")
         return
 
     plt.figure(figsize=(6, 5))
     plt.boxplot(data, labels=labels)
     plt.xlabel("Scale")
     plt.ylabel("Product amount Y")
-    plt.title("Initial experiments: Y distribution by scale")
+    plt.title("Y distribution by scale")
     plt.grid(True, axis="y")
     plt.tight_layout()
-    save_path = FIGURES_DIR / "Initial_Y_distribution_by_scale.png"
+
+    save_path = FIGURES_DIR / "Y_distribution_by_scale.png"
     plt.savefig(save_path, dpi=200)
     plt.close()
     print(f"Saved figure: {save_path}")
 
 
-def visualizations(df: pd.DataFrame) -> None:
-    print("\nINITIAL EXPLORATORY VISUALIZATION")
-    plot_y_vs_variables(df)
-    plot_y_distribution_by_scale(df)
+def visualisation_analysis(vis_df: pd.DataFrame) -> None:
+    print("\nY DEPENDENCE VISUALIZATION")
+
+    summary = summarize_visualisation_data(vis_df)
+    print("\nscale summary from visualisation.csv:")
+    print(summary)
+
+    vis_df.to_csv(TABLES_DIR / "cleaned_visualisation_data.csv", index=False)
+
+    plot_y_vs_variables(vis_df)
+    plot_y_distribution_by_scale(vis_df)
 
 
-# Task 2: noise and bias from initial data
+# Task 2: Noise and bias analysis
 
-def noise_analysis(df: pd.DataFrame, rounding_digits: int = 3) -> pd.DataFrame:
+def load_noise_bias_data(micro_path: Path, bench_path: Path, pilot_path: Path) -> pd.DataFrame:
+    """Load and combine the three repeated-recipe noise/bias datasets."""
+    micro = load_and_clean_csv(micro_path, forced_scale="micro")
+    bench = load_and_clean_csv(bench_path, forced_scale="bench")
+    pilot = load_and_clean_csv(pilot_path, forced_scale="pilot")
+
+    combined = pd.concat([micro, bench, pilot], ignore_index=True)
+    combined = add_recipe_id(combined, rounding_digits=8)
+
+    combined.to_csv(TABLES_DIR / "cleaned_combined_noise_bias_data.csv", index=False)
+
+    return combined
+
+
+def recipe_noise_analysis(nb_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
-    Estimate measurement noise using repeated or near-repeated recipes.
+    Estimate measurement noise.
 
-    Noise can be estimated only when the same/near-same recipe appears more than
-    once at the same scale. Since the initial design usually explores many
-    different recipes, repeated points may be absent.
+    For each scale and repeated recipe:
+        mean_Y = average product amount
+        std_Y  = standard deviation across 10 repeats
+        cv_Y   = std_Y / |mean_Y|
+
+    Then summarize noise per scale.
     """
-    print("INITIAL NOISE ANALYSIS")
-
-    work = df.copy()
-
-    rounded_cols = []
-    for col in RECIPE_COLUMNS:
-        rounded_col = f"{col}_rounded"
-        work[rounded_col] = work[col].round(rounding_digits)
-        rounded_cols.append(rounded_col)
-
-    noise_table = (
-        work.groupby(["scale"] + rounded_cols)["Y"]
-        .agg(count="count", mean_Y="mean", std_Y="std")
+    recipe_noise = (
+        nb_df.groupby(["scale", "recipe_id"])
+        .agg(
+            repeat_count=("Y", "count"),
+            mean_Y=("Y", "mean"),
+            std_Y=("Y", "std"),
+            min_Y=("Y", "min"),
+            max_Y=("Y", "max"),
+            T=("T", "mean"),
+            pH=("pH", "mean"),
+            F1=("F1", "mean"),
+            F2=("F2", "mean"),
+            F3=("F3", "mean"),
+        )
         .reset_index()
     )
 
-    repeated_noise = noise_table[noise_table["count"] > 1].copy()
-    repeated_noise.to_csv(TABLES_DIR / "initial_repeated_noise_table.csv", index=False)
-
-    if len(repeated_noise) == 0:
-        print("No repeated or near-repeated recipes found in the initial data.")
-        print("Direct noise estimation is therefore not possible from the initial log.")
-        return repeated_noise
-
-    print("Repeated or near-repeated recipes found:")
-    print(repeated_noise)
+    recipe_noise["cv_Y"] = recipe_noise["std_Y"] / recipe_noise["mean_Y"].abs()
 
     scale_noise = (
-        repeated_noise.groupby("scale")["std_Y"]
-        .mean()
-        .reset_index(name="mean_std_Y")
+        recipe_noise.groupby("scale")
+        .agg(
+            recipes=("recipe_id", "count"),
+            mean_repeat_count=("repeat_count", "mean"),
+            mean_Y=("mean_Y", "mean"),
+            mean_std_Y=("std_Y", "mean"),
+            median_std_Y=("std_Y", "median"),
+            mean_cv_Y=("cv_Y", "mean"),
+            median_cv_Y=("cv_Y", "median"),
+        )
+        .reset_index()
     )
-    scale_noise.to_csv(TABLES_DIR / "initial_noise_per_scale.csv", index=False)
+
+    recipe_noise.to_csv(TABLES_DIR / "recipe_noise_table.csv", index=False)
+    scale_noise.to_csv(TABLES_DIR / "noise_per_scale.csv", index=False)
+
+    print("\nnoise per scale:")
+    print(scale_noise)
 
     plt.figure(figsize=(6, 4))
     plt.bar(scale_noise["scale"], scale_noise["mean_std_Y"])
     plt.xlabel("Scale")
     plt.ylabel("Mean standard deviation of Y")
-    plt.title("Initial experiments: estimated noise per scale")
+    plt.title("Measurement noise per scale")
     plt.grid(True, axis="y")
     plt.tight_layout()
-    save_path = FIGURES_DIR / "initial_noise_per_scale.png"
+
+    save_path = FIGURES_DIR / "noise_per_scale.png"
     plt.savefig(save_path, dpi=200)
     plt.close()
     print(f"Saved figure: {save_path}")
-
-    return repeated_noise
-
-
-def exact_bias_analysis(df: pd.DataFrame, rounding_digits: int = 3) -> pd.DataFrame:
-    """
-    Estimate exact/rounded bias from recipes tested at multiple scales.
-
-    Bias definitions:
-        bench_bias = bench Y - pilot Y
-        micro_bias = micro Y - pilot Y
-
-    This requires the same or rounded-same recipe to exist at both lower scale
-    and pilot scale. If no common recipes exist, this function reports that
-    exact bias cannot be estimated from the initial design.
-    """
-    print("\nINITIAL EXACT/ROUNDED BIAS ANALYSIS")
-
-    work = df.copy()
-
-    rounded_cols = []
-    for col in RECIPE_COLUMNS:
-        rounded_col = f"{col}_rounded"
-        work[rounded_col] = work[col].round(rounding_digits)
-        rounded_cols.append(rounded_col)
-
-    avg = (
-        work.groupby(rounded_cols + ["scale"])["Y"]
-        .mean()
-        .reset_index()
-    )
-
-    comparison = avg.pivot_table(index=rounded_cols, columns="scale", values="Y").reset_index()
-    comparison.to_csv(TABLES_DIR / "initial_scale_comparison_rounded.csv", index=False)
-
-    if "pilot" not in comparison.columns:
-        print("No Pilot data found in initial data. Bias relative to Pilot cannot be estimated.")
-        return comparison
-
-    if "bench" in comparison.columns:
-        comparison["bench_bias"] = comparison["bench"] - comparison["pilot"]
-        bench_pilot = comparison[rounded_cols + ["bench", "pilot", "bench_bias"]].dropna()
-        bench_pilot.to_csv(TABLES_DIR / "initial_bench_pilot_bias.csv", index=False)
-        if len(bench_pilot) > 0:
-            print("Bench-Pilot bias from common rounded initial recipes:")
-            print(bench_pilot)
-            print("Average Bench bias:", bench_pilot["bench_bias"].mean())
-        else:
-            print("No common rounded Bench-Pilot recipes found in initial data.")
-
-    if "micro" in comparison.columns:
-        comparison["micro_bias"] = comparison["micro"] - comparison["pilot"]
-        micro_pilot = comparison[rounded_cols + ["micro", "pilot", "micro_bias"]].dropna()
-        micro_pilot.to_csv(TABLES_DIR / "initial_micro_pilot_bias.csv", index=False)
-        if len(micro_pilot) > 0:
-            print("Micro-Pilot bias from common rounded initial recipes:")
-            print(micro_pilot)
-            print("Average Micro bias:", micro_pilot["micro_bias"].mean())
-        else:
-            print("No common rounded Micro-Pilot recipes found in initial data.")
-
-    return comparison
-
-
-def nearest_pilot_bias(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Approximate fallback bias estimate for initial data.
-
-    For each micro/bench initial experiment, find the nearest Pilot recipe in
-    normalized recipe space and compute:
-        approximate bias = lower-scale Y - nearest Pilot Y
-
-    This is only an approximation, because the recipes are similar but not
-    identical. Use it only to discuss scale behavior, not as an exact bias.
-    """
-    print("\nINITIAL APPROXIMATE NEAREST-PILOT BIAS")
-
-    pilot = df[df["scale"] == "pilot"].copy()
-    lower = df[df["scale"].isin(["micro", "bench"])].copy()
-
-    if len(pilot) == 0 or len(lower) == 0:
-        print("Nearest-pilot bias cannot be calculated because pilot or lower-scale initial data is missing.")
-        return pd.DataFrame()
-
-    rows = []
-
-    pilot_x = pilot[NORMALIZED_COLUMNS].to_numpy(dtype=float)
-    pilot_y = pilot["Y"].to_numpy(dtype=float)
-
-    for _, row in lower.iterrows():
-        x = row[NORMALIZED_COLUMNS].to_numpy(dtype=float)
-        distances = np.linalg.norm(pilot_x - x, axis=1)
-        nearest_index = int(np.argmin(distances))
-
-        nearest_pilot_row = pilot.iloc[nearest_index]
-
-        rows.append({
-            "scale": row["scale"],
-            "Y_scale": row["Y"],
-            "nearest_pilot_Y": pilot_y[nearest_index],
-            "approx_bias": row["Y"] - pilot_y[nearest_index],
-            "distance_to_nearest_pilot_norm_space": distances[nearest_index],
-            "T": row["T"],
-            "pH": row["pH"],
-            "F1": row["F1"],
-            "F2": row["F2"],
-            "F3": row["F3"],
-            "nearest_pilot_T": nearest_pilot_row["T"],
-            "nearest_pilot_pH": nearest_pilot_row["pH"],
-            "nearest_pilot_F1": nearest_pilot_row["F1"],
-            "nearest_pilot_F2": nearest_pilot_row["F2"],
-            "nearest_pilot_F3": nearest_pilot_row["F3"],
-        })
-
-    result = pd.DataFrame(rows)
-    result.to_csv(TABLES_DIR / "initial_nearest_pilot_bias.csv", index=False)
-
-    summary = (
-        result.groupby("scale")["approx_bias"]
-        .agg(count="count", mean_bias="mean", std_bias="std")
-        .reset_index()
-    )
-    summary.to_csv(TABLES_DIR / "initial_nearest_pilot_bias_summary.csv", index=False)
-
-    print("Approximate nearest-pilot bias summary from initial data:")
-    print(summary)
 
     plt.figure(figsize=(6, 4))
-    plt.bar(summary["scale"], summary["mean_bias"])
+    plt.bar(scale_noise["scale"], scale_noise["mean_cv_Y"])
     plt.xlabel("Scale")
-    plt.ylabel("Approximate bias: scale Y - nearest Pilot Y")
-    plt.title("Initial experiments: approximate bias relative to nearest Pilot")
+    plt.ylabel("Mean coefficient of variation")
+    plt.title("Relative noise per scale")
     plt.grid(True, axis="y")
     plt.tight_layout()
-    save_path = FIGURES_DIR / "initial_nearest_pilot_bias_summary.png"
+
+    save_path = FIGURES_DIR / "relative_noise_per_scale.png"
     plt.savefig(save_path, dpi=200)
     plt.close()
     print(f"Saved figure: {save_path}")
 
-    return result
+    return recipe_noise, scale_noise
 
 
-def analysis(df: pd.DataFrame) -> None:
-    print("\nINITIAL SCALE NOISE AND BIAS ANALYSIS")
-    noise_analysis(df)
-    exact_bias_analysis(df)
-    nearest_pilot_bias(df)
+def bias_analysis(recipe_noise: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Estimate scale bias using recipe-wise mean Y values.
+
+    Since the same 16 recipes were repeated at all three scales:
+        micro_bias = micro_mean_Y - pilot_mean_Y
+        bench_bias = bench_mean_Y - pilot_mean_Y
+
+    Positive bias: lower scale overestimates Pilot.
+    Negative bias: lower scale underestimates Pilot.
+    """
+    mean_by_recipe_scale = recipe_noise[["recipe_id", "scale", "mean_Y", "std_Y", "repeat_count"]].copy()
+
+    pivot = mean_by_recipe_scale.pivot(index="recipe_id", columns="scale", values="mean_Y").reset_index()
+    pivot.to_csv(TABLES_DIR / "mean_Y_and_scale.csv", index=False)
+
+    if "pilot" not in pivot.columns:
+        raise ValueError("Pilot scale is missing. Bias relative to Pilot cannot be calculated.")
+
+    if "micro" in pivot.columns:
+        pivot["micro_bias"] = pivot["micro"] - pivot["pilot"]
+
+    if "bench" in pivot.columns:
+        pivot["bench_bias"] = pivot["bench"] - pivot["pilot"]
+
+    bias_cols = ["recipe_id"]
+    for c in ["micro", "bench", "pilot", "micro_bias", "bench_bias"]:
+        if c in pivot.columns:
+            bias_cols.append(c)
+
+    bias_table = pivot[bias_cols].copy()
+    bias_table.to_csv(TABLES_DIR / "bias_relative_to_pilot.csv", index=False)
+
+    summary_rows = []
+    if "micro_bias" in bias_table.columns:
+        summary_rows.append({
+            "scale": "micro",
+            "mean_bias": bias_table["micro_bias"].mean(),
+            "median_bias": bias_table["micro_bias"].median(),
+            "std_bias": bias_table["micro_bias"].std(),
+            "min_bias": bias_table["micro_bias"].min(),
+            "max_bias": bias_table["micro_bias"].max(),
+        })
+
+    if "bench_bias" in bias_table.columns:
+        summary_rows.append({
+            "scale": "bench",
+            "mean_bias": bias_table["bench_bias"].mean(),
+            "median_bias": bias_table["bench_bias"].median(),
+            "std_bias": bias_table["bench_bias"].std(),
+            "min_bias": bias_table["bench_bias"].min(),
+            "max_bias": bias_table["bench_bias"].max(),
+        })
+
+    bias_summary = pd.DataFrame(summary_rows)
+    bias_summary.to_csv(TABLES_DIR / "bias_summary_relative_to_pilot.csv", index=False)
+
+    print("\nBias summary relative to Pilot:")
+    print(bias_summary)
+
+    plt.figure(figsize=(6, 4))
+    plt.bar(bias_summary["scale"], bias_summary["mean_bias"])
+    plt.axhline(0, linewidth=1)
+    plt.xlabel("Lower-fidelity scale")
+    plt.ylabel("Mean bias: scale Y - Pilot Y")
+    plt.title("Mean bias relative to Pilot")
+    plt.grid(True, axis="y")
+    plt.tight_layout()
+
+    save_path = FIGURES_DIR / "mean_bias_relative_to_pilot.png"
+    plt.savefig(save_path, dpi=200)
+    plt.close()
+    print(f"Saved figure: {save_path}")
+
+    # Recipe-wise comparison plot
+    plt.figure(figsize=(8, 5))
+    for scale in ["micro", "bench", "pilot"]:
+        if scale in pivot.columns:
+            plt.plot(pivot["recipe_id"], pivot[scale], marker="o", label=scale)
+
+    plt.xlabel("Recipe ID")
+    plt.ylabel("Mean product amount Y")
+    plt.title("Mean Y for repeated recipes across scales")
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+
+    save_path = FIGURES_DIR / "mean_Y_by_recipe_across_scales.png"
+    plt.savefig(save_path, dpi=200)
+    plt.close()
+    print(f"Saved figure: {save_path}")
+
+    return bias_table, bias_summary
 
 
-# Summary tables for initial data
 
-def save_summary_tables(df: pd.DataFrame) -> None:
-    """Save basic scale-wise summary tables for initial experiments."""
-    scale_summary = (
-        df.groupby("scale")
-        .agg(
-            count=("Y", "count"),
-            mean_Y=("Y", "mean"),
-            std_Y=("Y", "std"),
-            min_Y=("Y", "min"),
-            max_Y=("Y", "max"),
-            total_cost_eur=("cost_eur", "sum"),
-        )
-        .reset_index()
-    )
-    scale_summary.to_csv(TABLES_DIR / "initial_scale_summary.csv", index=False)
+def noise_bias_analysis(nb_df: pd.DataFrame) -> None:
+    print("\nNOISE AND BIAS ANALYSIS")
 
-    print("\nInitial scale summary:")
-    print(scale_summary)
+    recipe_noise, scale_noise = recipe_noise_analysis(nb_df)
+    bias_table, bias_summary = bias_analysis(recipe_noise)
+
 
 
 # Main
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Task 1 and Task 2 initial-experiment analysis for MLME bioreactor logs."
+        description="MLME Task 1 and Task 2 analysis using separate visualisation and repeated noise/bias CSV files."
     )
+
     parser.add_argument(
-        "--log-file",
+        "--visualisation-file",
         type=str,
         default=None,
-        help="Optional path to a specific optimization log CSV. If not given, latest results/optimization_log_*.csv is used.",
+        help="Path to visualisation.csv. If not given, script searches in results/ and project root.",
     )
+
+    parser.add_argument(
+        "--micro-file",
+        type=str,
+        default=None,
+        help="Path to Microplate_noise_bias_analysis.csv.",
+    )
+
+    parser.add_argument(
+        "--bench-file",
+        type=str,
+        default=None,
+        help="Path to Bench_noise_bias_analysis.csv.",
+    )
+
+    parser.add_argument(
+        "--pilot-file",
+        type=str,
+        default=None,
+        help="Path to pilot_noise_bias_analysis.csv.",
+    )
+
     args = parser.parse_args()
 
-    if args.log_file is None:
-        log_file = find_latest_log_file()
-    else:
-        log_file = Path(args.log_file)
-        if not log_file.is_absolute():
-            log_file = PROJECT_DIR / log_file
+    visualisation_file = resolve_input_file(
+        args.visualisation_file,
+        ["visualisation.csv", "visualization.csv"]
+    )
+    micro_file = resolve_input_file(
+        args.micro_file,
+        ["Microplate_noise_bias_analysis.csv", "microplate_noise_bias_analysis.csv"]
+    )
+    bench_file = resolve_input_file(
+        args.bench_file,
+        ["Bench_noise_bias_analysis.csv", "bench_noise_bias_analysis.csv"]
+    )
+    pilot_file = resolve_input_file(
+        args.pilot_file,
+        ["pilot_noise_bias_analysis.csv", "Pilot_noise_bias_analysis.csv"]
+    )
 
-    print(f"Reading log file: {log_file}")
-    full_df = load_and_clean_log(log_file)
+    print("Using input files:")
+    print(f" - Task 1 visualisation: {visualisation_file}")
+    print(f" - Task 2 microplate:    {micro_file}")
+    print(f" - Task 2 bench:         {bench_file}")
+    print(f" - Task 2 pilot:         {pilot_file}")
 
-    cleaned_full_path = TABLES_DIR / "cleaned_full_optimization_log_reference.csv"
-    full_df.to_csv(cleaned_full_path, index=False)
-    print(f"Saved cleaned full log for reference: {cleaned_full_path}")
+    # Task 1
+    vis_df = load_and_clean_csv(visualisation_file)
+    visualisation_analysis(vis_df)
 
-    initial_df = select_initial_iteration(full_df)
-
-    cleaned_initial_path = TABLES_DIR / "cleaned_initial_iteration_log.csv"
-    initial_df.to_csv(cleaned_initial_path, index=False)
-    print(f"Saved cleaned initial log: {cleaned_initial_path}")
-
-    print("\nInitial dataframe preview:")
-    print(initial_df.head())
-
-    print("\nNumber of initial experiments:", len(initial_df))
-    print("Initial experiments by scale:")
-    print(initial_df["scale"].value_counts())
-
-    save_summary_tables(initial_df)
-    visualizations(initial_df)
-    analysis(initial_df)
+    # Task 2
+    nb_df = load_noise_bias_data(
+        micro_path=micro_file,
+        bench_path=bench_file,
+        pilot_path=pilot_file,
+    )
+    noise_bias_analysis(nb_df)
 
     print("\nDone.")
     print(f"Figures saved in: {FIGURES_DIR}")
