@@ -463,7 +463,7 @@ def baysian_optimization():
     return objective_value, cumulative_cost, n_pilot
 
 if __name__ == "__main__":
-    N_TRIALS = 1
+    N_TRIALS = 10
     trial_yields: list[float] = []
     trial_costs: list[float] = []
     trial_n_pilot: list[float] = []
