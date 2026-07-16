@@ -71,6 +71,11 @@ class BioreactorClient:
                 raise RuntimeError(
                     f"group budget exhausted: {r.json().get('detail')}"
                 )
+            if r.status_code == 403:
+                wait = 2.5 ** attempt
+                print(f"  [HTTPError: 403 Client Error: Forbidden for url: https://mlme26biosim.org/api/run, sleeping {wait:.1f}s]", flush=True)
+                time.sleep(wait)
+                continue
             if r.status_code >= 500:
                 # transient server-side failure — same backoff as 429
                 wait = 2.5 ** attempt
